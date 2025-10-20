@@ -1,0 +1,348 @@
+// Wordle in Google Sheets (bound script)
+// Assumptions (per your layout):
+// - Guess grid: B2:F8
+// - Keyboard rows: I3:R3, I4:Q4, J5:P5
+// - Guess input merged cell: J9:P9 (top-left is J9)
+// - Instructions located in J7:P7 (we won't overwrite that)
+// - Word list / dictionary: B11:B2341
+//
+// Usage:
+// 1. Run "onOpen" once from the Apps Script editor (authorizes the script).
+// 2. Use menu "Wordle → New game" to start a new game.
+// 3. Type a 5-letter guess into the merged cell J9:P9 and press Enter.
+// 4. Script writes guess into the next row of B2:F8 and colors letters + keyboard.
+
+const GRID_TOP_ROW = 2;
+const GRID_LEFT_COL = 2;   // column B
+const GRID_ROWS = 6;
+const GRID_COLS = 5;
+
+const GUESS_BOX_TOP_ROW = 9;
+const GUESS_BOX_LEFT_COL = 10; // column J
+const GUESS_BOX_A1 = 'J9:P9';
+
+const DICTIONARY_RANGE = 'B11:B14865';
+const STATUS_CELL_A1 = 'J8'; // short status messages (doesn't overwrite J7:P7 instructions)
+
+// Wordle colors (hex)
+const COLORS = {
+  green: '#6aaa64',
+  yellow: '#c9b458',
+  grey: '#787c7e',
+  white: '#ffffff'
+};
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Wordle')
+    .addItem('New game', 'startNewGame')
+    .addItem('Set target manually', 'setTargetManually')
+    .addItem('Reveal target', 'revealTarget')
+    .addToUi();
+}
+
+// Start a new game on the active sheet
+function startNewGame() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  const props = PropertiesService.getDocumentProperties();
+
+  const dict = getDictionary(sheet);
+  if (!dict.length) {
+    SpreadsheetApp.getActiveSpreadsheet().toast('Dictionary empty — fill ' + DICTIONARY_RANGE);
+    return;
+  }
+
+  // pick a random target from the dictionary
+  const idx = Math.floor(Math.random() * dict.length);
+  const target = dict[idx];
+
+  props.setProperty('wordle_target', target);
+  props.setProperty('wordle_attempt', '0');
+  props.setProperty('wordle_sheet', sheet.getName());
+  props.setProperty('wordle_target_index', String(idx));
+
+  // reset UI
+  clearGrid(sheet);
+  resetKeyboard(sheet);
+  sheet.getRange(STATUS_CELL_A1).clearContent();
+  sheet.getRange(GUESS_BOX_A1).clearContent();
+
+  SpreadsheetApp.getActiveSpreadsheet().toast('New Wordle started!');
+}
+
+// Prompt user to set a target word manually (from menu)
+function setTargetManually() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  const props = PropertiesService.getDocumentProperties();
+  const dict = getDictionary(sheet);
+
+  const response = ui.prompt('Set Wordle target', 'Enter a 5-letter word (must be in the word list):', ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  let w = String(response.getResponseText() || '').trim().toUpperCase();
+  if (!/^[A-Z]{5}$/.test(w)) {
+    ui.alert('Target must be exactly 5 letters A–Z.');
+    return;
+  }
+
+  if (dict.indexOf(w) === -1) {
+    ui.alert('Word not found in the dictionary range ' + DICTIONARY_RANGE + '. Add it there first or pick another');
+    return;
+  }
+
+  props.setProperty('wordle_target', w);
+  props.setProperty('wordle_attempt', '0');
+  props.setProperty('wordle_sheet', sheet.getName());
+  SpreadsheetApp.getActiveSpreadsheet().toast('Target set manually.');
+  clearGrid(sheet);
+  resetKeyboard(sheet);
+}
+
+// Reveal the current target (shows in STATUS_CELL_A1)
+function revealTarget() {
+  const props = PropertiesService.getDocumentProperties();
+  const target = props.getProperty('wordle_target') || '(none)';
+  const sheetName = props.getProperty('wordle_sheet') || SpreadsheetApp.getActiveSheet().getName();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName) || SpreadsheetApp.getActiveSheet();
+  sheet.getRange(STATUS_CELL_A1).setValue('Target: ' + target);
+}
+
+// Simple onEdit: detect when user finishes typing in the guess box (J9:P9)
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    const sheet = e.range.getSheet();
+    const props = PropertiesService.getDocumentProperties();
+    const gameSheetName = props.getProperty('wordle_sheet');
+    // If a game is active on a specific sheet, ignore edits on other sheets.
+    if (gameSheetName && sheet.getName() !== gameSheetName) return;
+
+    // detect edit inside the merged guess box row 9, columns J..P (10..16)
+    const r = e.range;
+    const rRow = r.getRow();
+    const rCol = r.getColumn();
+    const rLastCol = r.getLastColumn();
+    const rLastRow = r.getLastRow();
+
+    if (!(rRow === GUESS_BOX_TOP_ROW && rLastRow === GUESS_BOX_TOP_ROW && rCol >= GUESS_BOX_LEFT_COL && rLastCol <= (GUESS_BOX_LEFT_COL + 6))) {
+      return; // not the guess box
+    }
+
+    // read the merged guess box content (always read from top-left of merged area)
+    const guessRaw = sheet.getRange(GUESS_BOX_A1.split(':')[0]).getDisplayValue() || '';
+    const guess = String(guessRaw).trim().toUpperCase();
+
+    if (guess === '') return; // user erased
+    if (!/^[A-Z]{5}$/.test(guess)) {
+      SpreadsheetApp.getActiveSpreadsheet().toast('Please enter exactly 5 letters (A–Z).');
+      sheet.getRange(GUESS_BOX_A1.split(':')[0]).clearContent();
+      return;
+    }
+
+    // load dictionary and validate word
+    const dict = getDictionary(sheet);
+    if (dict.indexOf(guess) === -1) {
+      SpreadsheetApp.getActiveSpreadsheet().toast('Not in word list.');
+      sheet.getRange(GUESS_BOX_A1.split(':')[0]).clearContent();
+      return;
+    }
+
+    // get target and attempt
+    let attempt = parseInt(props.getProperty('wordle_attempt') || '0', 10);
+    const target = props.getProperty('wordle_target') || pickRandomTarget(sheet);
+
+    if (isNaN(attempt)) attempt = 0;
+    if (attempt >= GRID_ROWS) {
+      SpreadsheetApp.getActiveSpreadsheet().toast('No attempts left — start a new game.');
+      sheet.getRange(GUESS_BOX_A1.split(':')[0]).clearContent();
+      return;
+    }
+
+    // evaluate guess
+    const statuses = evaluateGuess(guess, target); // returns array of 'green'|'yellow'|'grey'
+    // write letters into grid row
+    const targetRow = GRID_TOP_ROW + attempt;
+    const letters = guess.split('');
+    sheet.getRange(targetRow, GRID_LEFT_COL, 1, GRID_COLS).setValues([letters])
+      .setHorizontalAlignment('center')
+      .setVerticalAlignment('middle')
+      .setFontWeight('bold');
+
+    // color the row
+    const bgRow = statuses.map(s => COLORS[s] || COLORS.grey);
+    sheet.getRange(targetRow, GRID_LEFT_COL, 1, GRID_COLS).setBackgrounds([bgRow]);
+    // font colors: yellow -> black text, others white
+    const fontRow = statuses.map(s => s === 'yellow' ? '#000000' : '#ffffff');
+    sheet.getRange(targetRow, GRID_LEFT_COL, 1, GRID_COLS).setFontColors([fontRow]);
+
+    // update the on-sheet keyboard
+    updateKeyboardForGuess(sheet, letters, statuses);
+
+    // increment attempt
+    attempt++;
+    props.setProperty('wordle_attempt', String(attempt));
+
+    // clear guess box
+    sheet.getRange(GUESS_BOX_A1.split(':')[0]).clearContent();
+
+    // check win/lose
+    if (statuses.every(s => s === 'green')) {
+      sheet.getRange(STATUS_CELL_A1).setValue('You win! Attempts used: ' + attempt);
+      SpreadsheetApp.getActiveSpreadsheet().toast('You win! 🎉');
+      return;
+    }
+
+    if (attempt >= GRID_ROWS) {
+      sheet.getRange(STATUS_CELL_A1).setValue('Out of tries. Target: ' + target);
+      SpreadsheetApp.getActiveSpreadsheet().toast('Out of tries — target revealed in ' + STATUS_CELL_A1);
+      return;
+    }
+
+    // otherwise, brief status message
+    sheet.getRange(STATUS_CELL_A1).setValue('Attempt ' + attempt + ' / ' + GRID_ROWS);
+
+  } catch (err) {
+    // Don't break on errors; show a toast for visibility
+    SpreadsheetApp.getActiveSpreadsheet().toast('Wordle script error: ' + err.message);
+    console.error(err);
+  }
+}
+
+// Evaluate a guess against the target following Wordle rules (accounts for duplicate letters)
+function evaluateGuess(guess, target) {
+  guess = guess.toUpperCase();
+  target = target.toUpperCase();
+  const result = Array(5).fill('grey');
+
+  // first pass: mark greens and build counts for remaining target letters
+  const remaining = [];
+  for (let i = 0; i < 5; i++) {
+    if (guess[i] === target[i]) {
+      result[i] = 'green';
+    } else {
+      remaining.push(target[i]);
+    }
+  }
+
+  // counts for remaining letters
+  const counts = {};
+  remaining.forEach(l => counts[l] = (counts[l] || 0) + 1);
+
+  // second pass: mark yellows where counts allow
+  for (let i = 0; i < 5; i++) {
+    if (result[i] === 'green') continue;
+    const g = guess[i];
+    if (counts[g] && counts[g] > 0) {
+      result[i] = 'yellow';
+      counts[g] = counts[g] - 1;
+    } else {
+      result[i] = 'grey';
+    }
+  }
+  return result;
+}
+
+// Update the keyboard cells I3:R3, I4:Q4, J5:P5 to reflect guess statuses.
+// Priority: green > yellow > grey (we only upgrade a key's color)
+// Optimized keyboard update (batched)
+function updateKeyboardForGuess(sheet, letters, statuses) {
+  const ranges = ['I3:R3', 'I4:Q4', 'J5:P5'];
+  const COLORS_REV = { [COLORS.green]: 'green', [COLORS.yellow]: 'yellow', [COLORS.grey]: 'grey' };
+
+  const upgrades = {}; // letter -> highest status seen so far
+  for (let i = 0; i < letters.length; i++) {
+    const l = letters[i];
+    const s = statuses[i];
+    if (!upgrades[l] || statusPriority(s) > statusPriority(upgrades[l])) upgrades[l] = s;
+  }
+
+  ranges.forEach(rngA1 => {
+    const rng = sheet.getRange(rngA1);
+    const values = rng.getDisplayValues();
+    const bgs = rng.getBackgrounds();
+    const fontColors = rng.getFontColors();
+    const numRows = rng.getNumRows(), numCols = rng.getNumColumns();
+
+    for (let i = 0; i < numRows; i++) {
+      for (let j = 0; j < numCols; j++) {
+        const letter = (values[i][j] || '').toUpperCase();
+        const upgrade = upgrades[letter];
+        if (!upgrade) continue;
+
+        const current = COLORS_REV[bgs[i][j]] || 'none';
+        if (statusPriority(upgrade) > statusPriority(current)) {
+          bgs[i][j] = COLORS[upgrade];
+          fontColors[i][j] = upgrade === 'yellow' ? '#000000' : '#ffffff';
+        }
+      }
+    }
+
+    // batch update once per keyboard row
+    rng.setBackgrounds(bgs);
+    rng.setFontColors(fontColors);
+    rng.setFontWeights(Array(numRows).fill(Array(numCols).fill('bold')));
+  });
+}
+
+// Map a background color to a status string (best-effort)
+function colorToStatus(bg) {
+  if (!bg) return 'none';
+  bg = bg.toString().toLowerCase();
+  if (bg === COLORS.green) return 'green';
+  if (bg === COLORS.yellow) return 'yellow';
+  if (bg === COLORS.grey) return 'grey';
+  return 'none';
+}
+
+// Priority numeric for statuses
+function statusPriority(status) {
+  if (status === 'green') return 3;
+  if (status === 'yellow') return 2;
+  if (status === 'grey') return 1;
+  return 0;
+}
+
+// Clear the letter grid B2:F8 (content + backgrounds)
+function clearGrid(sheet) {
+  const rng = sheet.getRange(GRID_TOP_ROW, GRID_LEFT_COL, GRID_ROWS, GRID_COLS);
+  rng.clearContent();
+  rng.setBackground(COLORS.white);
+  rng.setFontColor('#000000');
+  rng.setFontWeight('normal');
+  rng.setHorizontalAlignment('center').setVerticalAlignment('middle');
+  rng.setBorder(true, true, true, true, true, true);
+}
+
+// Reset keyboard visual styling to neutral
+function resetKeyboard(sheet) {
+  const ranges = ['I3:R3', 'I4:Q4', 'J5:P5'];
+  for (let r = 0; r < ranges.length; r++) {
+    const rng = sheet.getRange(ranges[r]);
+    rng.setBackground(COLORS.white);
+    rng.setFontColor('#000000');
+    rng.setFontWeight('normal');
+    rng.setHorizontalAlignment('center').setVerticalAlignment('middle');
+  }
+}
+
+// Read dictionary words from DICTIONARY_RANGE, return uppercase 5-letter words
+function getDictionary(sheet) {
+  const vals = sheet.getRange(DICTIONARY_RANGE).getValues().flat();
+  const words = vals.map(v => (v || '').toString().trim().toUpperCase())
+    .filter(w => /^[A-Z]{5}$/.test(w));
+  return words;
+}
+
+// If target missing, pick one randomly (helper)
+function pickRandomTarget(sheet) {
+  const dict = getDictionary(sheet);
+  if (!dict.length) return '';
+  const idx = Math.floor(Math.random() * dict.length);
+  const t = dict[idx];
+  const props = PropertiesService.getDocumentProperties();
+  props.setProperty('wordle_target', t);
+  return t;
+}
