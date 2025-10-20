@@ -6,10 +6,17 @@
   ==================================================================
 -->
 
-## 10/20/2025 - Learn how to use Google apps script and cell functions.  
+## 10/20/2025 12:03 PM - Learn how to use Google apps script and cell functions.  
 
 During this project, I learned how to use Google Apps Script and advanced cell functions in Google Sheets to create interactive and dynamic spreadsheets. I relied heavily on the online developer tools provided by Google, experimenting with the built-in script editor, logging tools, and real-time debugging features. Much of my learning came through trial and error, testing different formulas, scripts, and workflows until I understood how to manipulate data, trigger events, and create custom functions. This process not only taught me the technical aspects of Google Sheets automation but also strengthened my problem-solving skills, patience, and ability to troubleshoot in a live development environment.
 
 ![image.png](https://blueprint.hackclub.com/user-attachments/blobs/proxy/eyJfcmFpbHMiOnsiZGF0YSI6Mzc4MiwicHVyIjoiYmxvYl9pZCJ9fQ==--70f50e62eacab7a7e73310d791925829a5160def/image.png)
   
+
+## 10/20/2025 12:06 PM - Wordle Page setup  
+
+![Screenshot 2025-10-20 12.05.12 PM.png](https://blueprint.hackclub.com/user-attachments/blobs/proxy/eyJfcmFpbHMiOnsiZGF0YSI6Mzc4MywicHVyIjoiYmxvYl9pZCJ9fQ==--e67880e2159579c8566f0e2a92f849db88ec1493/Screenshot%202025-10-20%2012.05.12%20PM.png)
+
+
+This is my setup, as you can see we have a standard guessing area and a keyboard to view the letters and their corresponding color. this vertin requires no in cell codeing and if your ok with what I have you can copy and paste the code in the next post  
 
