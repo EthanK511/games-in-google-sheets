@@ -1,0 +1,269 @@
+// Wordle in Google Sheets (bound script)
+// Layout assumptions:
+// - Guess grid: B2:F8
+// - Keyboard rows: I3:R3, I4:Q4, J5:P5
+// - Guess input merged cell: J9:P9 (top-left is J9)
+// - Instructions: J7:P7
+// - Word list / dictionary: B11:B14865
+
+const GRID = { top: 2, left: 2, rows: 6, cols: 5 };
+const GUESS_BOX = { row: 9, col: 10, A1: 'J9:P9', length: 5 };
+const STATUS_CELL = 'J8';
+const DICTIONARY_RANGE = 'B11:B14865';
+const KEYBOARD_RANGES = ['I3:R3', 'I4:Q4', 'J5:P5'];
+
+const COLORS = {
+  green: '#6aaa64',
+  yellow: '#c9b458',
+  grey: '#787c7e',
+  white: '#ffffff'
+};
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Wordle')
+    .addItem('New game', 'startNewGame')
+    .addItem('Set target manually', 'setTargetManually')
+    .addItem('Reveal target', 'revealTarget')
+    .addToUi();
+}
+
+// --------------------- Game Initialization ---------------------
+
+function startNewGame() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const props = PropertiesService.getDocumentProperties();
+  const dict = getDictionary(sheet);
+
+  if (!dict.length) return toast('Dictionary empty — fill ' + DICTIONARY_RANGE);
+
+  const target = dict[Math.floor(Math.random() * dict.length)];
+  props.setProperties({
+    wordle_target: target,
+    wordle_attempt: '0',
+    wordle_sheet: sheet.getName()
+  });
+
+  resetUI(sheet);
+  toast('New Wordle started!');
+}
+
+function setTargetManually() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const props = PropertiesService.getDocumentProperties();
+  const dict = getDictionary(sheet);
+
+  const response = ui.prompt('Set Wordle target', 'Enter a 5-letter word (must be in dictionary):', ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const word = response.getResponseText().trim().toUpperCase();
+  if (!/^[A-Z]{5}$/.test(word)) return ui.alert('Target must be exactly 5 letters A–Z.');
+  if (!dict.includes(word)) return ui.alert('Word not in dictionary.');
+
+  props.setProperties({
+    wordle_target: word,
+    wordle_attempt: '0',
+    wordle_sheet: sheet.getName()
+  });
+
+  resetUI(sheet);
+  toast('Target set manually.');
+}
+
+function revealTarget() {
+  const props = PropertiesService.getDocumentProperties();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const target = props.getProperty('wordle_target') || '(none)';
+  sheet.getRange(STATUS_CELL).setValue('Target: ' + target);
+}
+
+// --------------------- On Edit ---------------------
+
+function onEdit(e) {
+  if (!e?.range) return;
+
+  const sheet = e.range.getSheet();
+  const props = PropertiesService.getDocumentProperties();
+  if (props.getProperty('wordle_sheet') && sheet.getName() !== props.getProperty('wordle_sheet')) return;
+
+  if (!isInGuessBox(e.range)) return;
+
+  const guessCell = sheet.getRange(GUESS_BOX.A1.split(':')[0]);
+  const guess = guessCell.getDisplayValue().trim().toUpperCase();
+
+  if (!/^[A-Z]{5}$/.test(guess)) {
+    toast('Please enter exactly 5 letters (A–Z).');
+    guessCell.clearContent();
+    return;
+  }
+
+  const dict = getDictionary(sheet);
+  if (!dict.includes(guess)) {
+    toast('Not in word list.');
+    guessCell.clearContent();
+    return;
+  }
+
+  let attempt = parseInt(props.getProperty('wordle_attempt') || '0', 10);
+  const target = props.getProperty('wordle_target') || pickRandomTarget(sheet);
+  if (attempt >= GRID.rows) {
+    toast('No attempts left — start a new game.');
+    guessCell.clearContent();
+    return;
+  }
+
+  const statuses = evaluateGuess(guess, target);
+  writeGuessToGrid(sheet, attempt, guess, statuses);
+  updateKeyboardForGuess(sheet, guess.split(''), statuses);
+
+  attempt++;
+  props.setProperty('wordle_attempt', String(attempt));
+  guessCell.clearContent();
+
+  if (statuses.every(s => s === 'green')) {
+    sheet.getRange(STATUS_CELL).setValue('You win! Attempts used: ' + attempt);
+    return toast('You win! 🎉');
+  }
+
+  if (attempt >= GRID.rows) {
+    sheet.getRange(STATUS_CELL).setValue('Out of tries. Target: ' + target);
+    return toast('Out of tries — target revealed in ' + STATUS_CELL);
+  }
+
+  sheet.getRange(STATUS_CELL).setValue(`Attempt ${attempt} / ${GRID.rows}`);
+}
+
+// --------------------- Helpers ---------------------
+
+function isInGuessBox(range) {
+  const { row, col, length } = GUESS_BOX;
+  return range.getRow() === row && range.getColumn() >= col && range.getLastColumn() < col + length;
+}
+
+function toast(msg) {
+  SpreadsheetApp.getActiveSpreadsheet().toast(msg);
+}
+
+function resetUI(sheet) {
+  clearGrid(sheet);
+  resetKeyboard(sheet);
+  sheet.getRange(STATUS_CELL).clearContent();
+  sheet.getRange(GUESS_BOX.A1).clearContent();
+}
+
+function clearGrid(sheet) {
+  clearRange(sheet, GRID.top, GRID.left, GRID.rows, GRID.cols, COLORS.white);
+}
+
+function resetKeyboard(sheet) {
+  KEYBOARD_RANGES.forEach(rng => clearRange(sheet, ...sheet.getRange(rng).getA1Notation().split(':')));
+}
+
+function clearRange(sheet, topRow, leftCol, numRows, numCols, bg = COLORS.white) {
+  sheet.getRange(topRow, leftCol, numRows, numCols)
+    .clearContent()
+    .setBackground(bg)
+    .setFontColor('#000000')
+    .setFontWeight('normal')
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, true, true);
+}
+
+function getDictionary(sheet) {
+  return sheet.getRange(DICTIONARY_RANGE).getValues().flat()
+    .map(v => (v || '').toString().trim().toUpperCase())
+    .filter(w => /^[A-Z]{5}$/.test(w));
+}
+
+function pickRandomTarget(sheet) {
+  const dict = getDictionary(sheet);
+  if (!dict.length) return '';
+  const target = dict[Math.floor(Math.random() * dict.length)];
+  PropertiesService.getDocumentProperties().setProperty('wordle_target', target);
+  return target;
+}
+
+function evaluateGuess(guess, target) {
+  const result = Array(5).fill('grey');
+  const remaining = [];
+
+  for (let i = 0; i < 5; i++) {
+    if (guess[i] === target[i]) result[i] = 'green';
+    else remaining.push(target[i]);
+  }
+
+  const counts = {};
+  remaining.forEach(l => counts[l] = (counts[l] || 0) + 1);
+
+  for (let i = 0; i < 5; i++) {
+    if (result[i] === 'green') continue;
+    const g = guess[i];
+    if (counts[g] > 0) { result[i] = 'yellow'; counts[g]--; }
+  }
+
+  return result;
+}
+
+function writeGuessToGrid(sheet, attempt, guess, statuses) {
+  const letters = guess.split('');
+  const row = GRID.top + attempt;
+  const range = sheet.getRange(row, GRID.left, 1, GRID.cols);
+
+  range.setValues([letters])
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle');
+
+  range.setBackgrounds([statuses.map(s => COLORS[s])]);
+  range.setFontColors([statuses.map(s => s === 'yellow' ? '#000000' : '#ffffff')]);
+}
+
+function updateKeyboardForGuess(sheet, letters, statuses) {
+  const upgrades = {};
+
+  letters.forEach((l, i) => {
+    if (!upgrades[l] || statusPriority(statuses[i]) > statusPriority(upgrades[l])) upgrades[l] = statuses[i];
+  });
+
+  KEYBOARD_RANGES.forEach(rngA1 => {
+    const rng = sheet.getRange(rngA1);
+    const values = rng.getDisplayValues();
+    const bgs = rng.getBackgrounds();
+    const fonts = rng.getFontColors();
+    const numRows = rng.getNumRows();
+    const numCols = rng.getNumColumns();
+
+    for (let i = 0; i < numRows; i++) {
+      for (let j = 0; j < numCols; j++) {
+        const l = values[i][j].toUpperCase();
+        const status = upgrades[l];
+        if (!status) continue;
+
+        const currentPriority = statusPriority(colorToStatus(bgs[i][j]));
+        if (statusPriority(status) > currentPriority) {
+          bgs[i][j] = COLORS[status];
+          fonts[i][j] = status === 'yellow' ? '#000000' : '#ffffff';
+        }
+      }
+    }
+
+    rng.setBackgrounds(bgs);
+    rng.setFontColors(fonts);
+    rng.setFontWeights(Array(numRows).fill(Array(numCols).fill('bold')));
+  });
+}
+
+function colorToStatus(color) {
+  switch (color) {
+    case COLORS.green: return 'green';
+    case COLORS.yellow: return 'yellow';
+    case COLORS.grey: return 'grey';
+    default: return 'none';
+  }
+}
+
+function statusPriority(status) {
+  return { none: 0, grey: 1, yellow: 2, green: 3 }[status] || 0;
+}
