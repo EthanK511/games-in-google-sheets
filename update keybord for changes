@@ -1,0 +1,41 @@
+function updateKeyboardForGuess(sheet, letters, statuses) {
+  const upgrades = {};
+
+  // Determine the highest status for each letter
+  letters.forEach((l, i) => {
+    if (!upgrades[l] || statusPriority(statuses[i]) > statusPriority(upgrades[l])) upgrades[l] = statuses[i];
+  });
+
+  KEYBOARD_RANGES.forEach(rngA1 => {
+    const rng = sheet.getRange(rngA1);
+    const values = rng.getDisplayValues(); // letters in the keyboard
+    const numRows = rng.getNumRows();
+    const numCols = rng.getNumColumns();
+
+    // Prepare new backgrounds and font colors in arrays
+    const newBgs = Array.from({ length: numRows }, (_, i) => 
+      Array.from({ length: numCols }, (_, j) => {
+        const letter = (values[i][j] || '').toUpperCase();
+        const status = upgrades[letter];
+        const current = colorToStatus(rng.getBackgrounds()[i][j]);
+        return (status && statusPriority(status) > statusPriority(current)) ? COLORS[status] : rng.getBackgrounds()[i][j];
+      })
+    );
+
+    const newFonts = Array.from({ length: numRows }, (_, i) => 
+      Array.from({ length: numCols }, (_, j) => {
+        const letter = (values[i][j] || '').toUpperCase();
+        const status = upgrades[letter];
+        const current = colorToStatus(rng.getBackgrounds()[i][j]);
+        return (status && statusPriority(status) > statusPriority(current)) 
+          ? (status === 'yellow' ? '#000000' : '#ffffff') 
+          : rng.getFontColors()[i][j];
+      })
+    );
+
+    // Batch set all at once
+    rng.setBackgrounds(newBgs);
+    rng.setFontColors(newFonts);
+    rng.setFontWeights(Array(numRows).fill(Array(numCols).fill('bold')));
+  });
+}
